@@ -1,0 +1,111 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.27.1'
+          channel: 'stable'
+          cache: true
+
+      - name: Show repo files
+        run: |
+          echo "=== root ==="
+          ls -la
+          echo "=== lib ==="
+          ls -la lib || true
+          echo "=== pubspec ==="
+          cat pubspec.yaml || true
+          echo "=== .metadata ==="
+          cat .metadata 2>/dev/null || echo "(no .metadata)"
+
+      - name: Remove stale android + metadata
+        run: |
+          rm -rf android
+          rm -f .metadata
+          rm -f .flutter-plugins .flutter-plugins-dependencies
+          echo "after cleanup:"
+          ls -la
+
+      - name: Regenerate Android platform
+        run: flutter create --platforms=android --org com.example --project-name zf_schedule .
+
+      - name: Verify android structure
+        run: |
+          if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ]; then
+            echo "ERROR: android/settings.gradle not created"
+            ls -la android || true
+            exit 1
+          fi
+          echo "=== android/ ==="
+          ls -la android/
+          echo "=== settings.gradle ==="
+          cat android/settings.gradle 2>/dev/null || cat android/settings.gradle.kts
+          echo "=== gradle wrapper ==="
+          cat android/gradle/wrapper/gradle-wrapper.properties
+          echo "=== app/build.gradle ==="
+          head -50 android/app/build.gradle 2>/dev/null || head -50 android/app/build.gradle.kts
+
+      - name: Add INTERNET permission
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
+          fi
+          head -20 "$MANIFEST"
+
+      - name: Setup Gradle mirror
+        run: |
+          mkdir -p ~/.gradle
+          cat > ~/.gradle/init.gradle <<'GRADLE'
+          allprojects {
+            repositories {
+              maven { url 'https://maven.aliyun.com/repository/google' }
+              maven { url 'https://maven.aliyun.com/repository/central' }
+              maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+              maven { url 'https://maven.aliyun.com/repository/public' }
+            }
+          }
+          GRADLE
+
+      - name: Flutter pub get
+        env:
+          PUB_HOSTED_URL: https://pub.flutter-io.cn
+          FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
+        run: flutter pub get
+
+      - name: Build APK
+        env:
+          PUB_HOSTED_URL: https://pub.flutter-io.cn
+          FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
+        run: flutter build apk --release
+
+      - name: Show APK
+        if: always()
+        run: ls -lh build/app/outputs/flutter-apk/ || true
+
+      - name: Upload APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: warn
